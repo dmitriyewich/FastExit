@@ -129,21 +129,13 @@ bool WriteDefaultIniIfNotExists(const char* path) {
     }
     static const char kBody[] =
         "[Settings]\r\n"
-        "; Time in milliseconds — миллисекунды: патчи samp (таймер выгрузки и /quit) и верхняя граница Sleep\r\n"
-        ";   на время CGame::Shutdown (только gta_sa 1.0 US). В samp шаг ~100 мс.\r\n"
-        "; 0 — в окне shutdown все Sleep заменяются на Sleep(0) (может быть нестабильно с SA:MP/modloader).\r\n"
-        "; Устаревшие отрицательные значения: -1 = ExitProcess, -2 = TerminateProcess в точках хука (GTA и samp).\r\n"
+        "; Сколько миллисекунд ждать при выходе (SA:MP и выход из GTA 1.0). Не ставьте 0 без нужды. -1 или -2 — сразу вырубить игру (старый вариант).\r\n"
         "Time in milliseconds=1000\r\n"
         "\r\n"
-        "; CGame shutdown exit — при входе в CGame::Shutdown:\r\n"
-        "; 0 — обычная работа (штатный shutdown + ограничение Sleep по \"Time in milliseconds\")\r\n"
-        "; 1 — сразу ExitProcess (оригинальный shutdown не вызывается)\r\n"
-        "; 2 — сразу TerminateProcess\r\n"
+        "; «Выйти» в меню GTA: 0 — нормально; 1 или 2 — сразу выключить игру.\r\n"
         "CGame shutdown exit=0\r\n"
         "\r\n"
-        "; SAMP unload exit — первый вызов перехваченного GetTickCount в цепочке выгрузки samp (для R2 смещения GTC нет — ключ не сработает):\r\n"
-        "; 0 — обычная работа (патчатся imm32 таймеров по \"Time in milliseconds\")\r\n"
-        "; 1 / 2 — при первом таком вызове ExitProcess / TerminateProcess; в 1 и 2 imm32 в samp не патчуются\r\n"
+        "; При выходе из SA:MP: 0 — как обычно, 1 или 2 — сразу закрыть игру. На клиенте R2 не действует.\r\n"
         "SAMP unload exit=0\r\n";
     const HANDLE h = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
@@ -347,6 +339,11 @@ bool InstallGtaShutdownHooks() {
     return true;
 }
 
+/** Перехват GTC в samp нужен только для `SAMP unload exit` и устаревшего `Time in milliseconds` -1/-2 на пути samp; иначе хук ломает штатный выход (меню «Выйти» → CGame::Shutdown). */
+bool NeedSampGetTickCountHook() {
+    return g_config.sampUnloadExit != 0 || g_config.timeMs == -1 || g_config.timeMs == -2;
+}
+
 /** Патчит вызов GetTickCount на относительный call или indirect call к g_hookTargetAddress. */
 bool InstallGetTickCountHook(std::uintptr_t callAddress) {
     std::uint8_t op[2] = {};
@@ -386,6 +383,9 @@ bool ApplyPatches(HMODULE sampModule, const SampVersionInfo& version) {
         }
     }
     if (version.getTickCountCallOffset == 0) {
+        return true;
+    }
+    if (!NeedSampGetTickCountHook()) {
         return true;
     }
     return InstallGetTickCountHook(base + version.getTickCountCallOffset);
