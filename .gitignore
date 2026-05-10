@@ -1,0 +1,31 @@
+.dub
+docs.json
+__dummy.html
+docs/
+/transparentmenu
+transparentmenu.so
+transparentmenu.dylib
+transparentmenu.dll
+transparentmenu.a
+transparentmenu.lib
+transparentmenu-test-*
+*.exe
+*.o
+*.obj
+*.lst
+/build/
+/.vs/
+*.user
+# Локальное форумное описание (BBCode), не для публичного репо по умолчанию
+README.txt
+
+# Локальные тяжёлые вендоры / не публичные заметки (не требуются для сборки exitTime)
+/source/external/plugin-sdk/
+/source/external/simpleini/
+/source/external/SAMP-API-multiver/
+/publish/
+/.cursor/
+/.codex/
+/.claude/
+AGENTS.md
+context.md

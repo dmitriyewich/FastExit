@@ -1,0 +1,73 @@
+name: Build exitTime Release Win32
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/build-release-win32.yml'
+      - 'exitTime.sln'
+      - 'exitTime.vcxproj'
+      - 'source/**'
+  workflow_dispatch:
+  release:
+    types:
+      - published
+
+env:
+  BUILD_CONFIGURATION: Release
+  BUILD_PLATFORM: Win32
+  # В vcxproj по умолчанию v145; на windows-latest обычно доступен v143 — override для CI.
+  BUILD_TOOLSET: v143
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Verify vendored MinHook
+        shell: pwsh
+        run: |
+          $required = @(
+            'source/external/MinHook/include/MinHook.h',
+            'source/external/MinHook/src/buffer.c',
+            'source/external/MinHook/src/hook.c',
+            'source/external/MinHook/src/trampoline.c',
+            'source/external/MinHook/src/hde/hde32.c'
+          )
+          $missing = @($required | Where-Object { -not (Test-Path -LiteralPath $_) })
+          if ($missing.Count -gt 0) {
+            $missing | ForEach-Object { Write-Error "Missing: $_" }
+            exit 1
+          }
+
+      - name: Build Release Win32
+        shell: pwsh
+        run: |
+          msbuild exitTime.sln /m `
+            /p:Configuration=$env:BUILD_CONFIGURATION `
+            /p:Platform=$env:BUILD_PLATFORM `
+            /p:PlatformToolset=$env:BUILD_TOOLSET
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: exitTime-Release-Win32
+          path: build/Release/Win32/exitTime.asi
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload release asset
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/Release/Win32/exitTime.asi
