@@ -1,4 +1,4 @@
-name: Build exitTime Release Win32
+name: Build FastExit Release Win32
 
 on:
   push:
@@ -6,8 +6,8 @@ on:
       - main
     paths:
       - '.github/workflows/build-release-win32.yml'
-      - 'exitTime.sln'
-      - 'exitTime.vcxproj'
+      - 'FastExit.sln'
+      - 'FastExit.vcxproj'
       - 'source/**'
   workflow_dispatch:
   release:
@@ -53,7 +53,7 @@ jobs:
       - name: Build Release Win32
         shell: pwsh
         run: |
-          msbuild exitTime.sln /m `
+          msbuild FastExit.sln /m `
             /p:Configuration=$env:BUILD_CONFIGURATION `
             /p:Platform=$env:BUILD_PLATFORM `
             /p:PlatformToolset=$env:BUILD_TOOLSET
@@ -61,8 +61,8 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: exitTime-Release-Win32
-          path: build/Release/Win32/exitTime.asi
+          name: FastExit-Release-Win32
+          path: build/Release/Win32/FastExit.asi
           if-no-files-found: error
           retention-days: 30
 
@@ -70,4 +70,4 @@ jobs:
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: build/Release/Win32/exitTime.asi
+          files: build/Release/Win32/FastExit.asi

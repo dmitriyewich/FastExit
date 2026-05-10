@@ -19,7 +19,7 @@ transparentmenu-test-*
 # Локальное форумное описание (BBCode), не для публичного репо по умолчанию
 README.txt
 
-# Локальные тяжёлые вендоры / не публичные заметки (не требуются для сборки exitTime)
+# Локальные тяжёлые вендоры / не публичные заметки (не требуются для сборки FastExit)
 /source/external/plugin-sdk/
 /source/external/simpleini/
 /source/external/SAMP-API-multiver/

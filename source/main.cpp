@@ -11,12 +11,13 @@
 #include <cstring>
 #include <limits>
 
-static_assert(sizeof(void*) == 4, "exitTime.asi must be built for Win32.");
+static_assert(sizeof(void*) == 4, "FastExit.asi must be built for Win32.");
 
 namespace {
 
 // Состояние загрузки GTA (не HWND): см. plugin-sdk / общие гайды по Maestro state; <9 — ещё загрузка.
 constexpr DWORD kGtaLoadStateAddress = 0x00C8D4C0;
+constexpr char kIniFileName[] = "FastExit.ini";
 constexpr char kConfigSection[] = "Settings";
 constexpr char kConfigKey[] = "Time in milliseconds";
 constexpr char kConfigKeyCgameShutdownExit[] = "CGame shutdown exit";
@@ -102,10 +103,10 @@ const IMAGE_NT_HEADERS32* GetPe32NtHeaders(HMODULE module) {
     return nt;
 }
 
-/** Заполняет `out` полным путём к exitTime.ini рядом с загруженным ASI. */
+/** Заполняет `out` полным путём к FastExit.ini рядом с загруженным ASI. */
 void BuildConfigPath(char out[MAX_PATH]) {
     if (GetModuleFileNameA(g_module, out, MAX_PATH) == 0) {
-        strcpy_s(out, MAX_PATH, "exitTime.ini");
+        strcpy_s(out, MAX_PATH, kIniFileName);
         return;
     }
     char* slash = nullptr;
@@ -116,13 +117,13 @@ void BuildConfigPath(char out[MAX_PATH]) {
     }
     if (slash != nullptr) {
         slash[1] = '\0';
-        strcat_s(out, MAX_PATH, "exitTime.ini");
+        strcat_s(out, MAX_PATH, kIniFileName);
     } else {
-        strcpy_s(out, MAX_PATH, "exitTime.ini");
+        strcpy_s(out, MAX_PATH, kIniFileName);
     }
 }
 
-/** Если файла ещё нет — записывает UTF-8 шаблон с комментариями (;) и значениями по умолчанию. */
+/** Если FastExit.ini ещё нет — записывает UTF-8 шаблон с комментариями (;) и значениями по умолчанию. */
 bool WriteDefaultIniIfNotExists(const char* path) {
     if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) {
         return false;
