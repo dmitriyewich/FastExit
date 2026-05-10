@@ -15,9 +15,12 @@ static_assert(sizeof(void*) == 4, "exitTime.asi must be built for Win32.");
 
 namespace {
 
+// Состояние загрузки GTA (не HWND): см. plugin-sdk / общие гайды по Maestro state; <9 — ещё загрузка.
 constexpr DWORD kGtaLoadStateAddress = 0x00C8D4C0;
 constexpr char kConfigSection[] = "Settings";
 constexpr char kConfigKey[] = "Time in milliseconds";
+constexpr char kConfigKeyCgameShutdownExit[] = "CGame shutdown exit";
+constexpr char kConfigKeySampUnloadExit[] = "SAMP unload exit";
 constexpr int kDefaultTimeMs = 1000;
 
 // plugin-sdk shared/GameVersion.cpp (GTASA): dword @ image+0x1000 (VA 0x401000 при ImageBase 0x400000)
@@ -38,6 +41,10 @@ struct SampVersionInfo {
 
 struct Config {
     int timeMs = kDefaultTimeMs;
+    /** 0 — штатно (в т.ч. ограничение Sleep при shutdown); 1 — при входе в CGame::Shutdown вызвать ExitProcess; 2 — TerminateProcess. */
+    int cgameShutdownExit = 0;
+    /** 0 — штатно; 1/2 — при первом вызове перехваченного GetTickCount в цепочке выгрузки samp. На R2 смещения GTC нет — ключ не сработает. */
+    int sampUnloadExit = 0;
     char path[MAX_PATH]{};
 };
 
@@ -115,10 +122,69 @@ void BuildConfigPath(char out[MAX_PATH]) {
     }
 }
 
+/** Если файла ещё нет — записывает UTF-8 шаблон с комментариями (;) и значениями по умолчанию. */
+bool WriteDefaultIniIfNotExists(const char* path) {
+    if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) {
+        return false;
+    }
+    static const char kBody[] =
+        "[Settings]\r\n"
+        "; Time in milliseconds — миллисекунды: патчи samp (таймер выгрузки и /quit) и верхняя граница Sleep\r\n"
+        ";   на время CGame::Shutdown (только gta_sa 1.0 US). В samp шаг ~100 мс.\r\n"
+        "; 0 — в окне shutdown все Sleep заменяются на Sleep(0) (может быть нестабильно с SA:MP/modloader).\r\n"
+        "; Устаревшие отрицательные значения: -1 = ExitProcess, -2 = TerminateProcess в точках хука (GTA и samp).\r\n"
+        "Time in milliseconds=1000\r\n"
+        "\r\n"
+        "; CGame shutdown exit — при входе в CGame::Shutdown:\r\n"
+        "; 0 — обычная работа (штатный shutdown + ограничение Sleep по \"Time in milliseconds\")\r\n"
+        "; 1 — сразу ExitProcess (оригинальный shutdown не вызывается)\r\n"
+        "; 2 — сразу TerminateProcess\r\n"
+        "CGame shutdown exit=0\r\n"
+        "\r\n"
+        "; SAMP unload exit — первый вызов перехваченного GetTickCount в цепочке выгрузки samp (для R2 смещения GTC нет — ключ не сработает):\r\n"
+        "; 0 — обычная работа (патчатся imm32 таймеров по \"Time in milliseconds\")\r\n"
+        "; 1 / 2 — при первом таком вызове ExitProcess / TerminateProcess; в 1 и 2 imm32 в samp не патчуются\r\n"
+        "SAMP unload exit=0\r\n";
+    const HANDLE h = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    DWORD written = 0;
+    const DWORD n = static_cast<DWORD>(std::strlen(kBody));
+    const BOOL ok = WriteFile(h, kBody, n, &written, nullptr);
+    CloseHandle(h);
+    return ok != FALSE && written == n;
+}
+
+/** Читает целое из INI, приводит к [minV,maxV], пишет обратно нормализованную строку. */
+int LoadIniIntClamped(
+    const char* key, const char* defaultStr, int minV, int maxV, int fallback, const char* iniPath) {
+    char rawBuf[64] = {};
+    (void)GetPrivateProfileStringA(kConfigSection, key, defaultStr, rawBuf, static_cast<DWORD>(sizeof(rawBuf)), iniPath);
+    const char* rawStr = rawBuf[0] != '\0' ? rawBuf : defaultStr;
+    char* end = nullptr;
+    const long parsed = std::strtol(rawStr, &end, 10);
+    int v = fallback;
+    if (end != rawStr && *end == '\0') {
+        if (parsed < minV) {
+            v = minV;
+        } else if (parsed > maxV) {
+            v = maxV;
+        } else {
+            v = static_cast<int>(parsed);
+        }
+    }
+    char normalizedValue[32] = {};
+    _snprintf_s(normalizedValue, _TRUNCATE, "%d", v);
+    (void)WritePrivateProfileStringA(kConfigSection, key, normalizedValue, iniPath);
+    return v;
+}
+
 /** Читает INI рядом с ASI (`kernel32!GetPrivateProfileString`), парсит число, записывает нормализованное значение (`WritePrivateProfileString`). */
 Config LoadConfig() {
     Config config;
     BuildConfigPath(config.path);
+    (void)WriteDefaultIniIfNotExists(config.path);
 
     char rawBuf[64] = {};
     (void)GetPrivateProfileStringA(
@@ -137,6 +203,9 @@ Config LoadConfig() {
     char normalizedValue[32] = {};
     _snprintf_s(normalizedValue, _TRUNCATE, "%d", config.timeMs);
     (void)WritePrivateProfileStringA(kConfigSection, kConfigKey, normalizedValue, config.path);
+
+    config.cgameShutdownExit = LoadIniIntClamped(kConfigKeyCgameShutdownExit, "0", 0, 2, 0, config.path);
+    config.sampUnloadExit = LoadIniIntClamped(kConfigKeySampUnloadExit, "0", 0, 2, 0, config.path);
 
     return config;
 }
@@ -185,23 +254,33 @@ const SampVersionInfo* DetectSampVersion(HMODULE sampModule) {
     return nullptr;
 }
 
-/** При timeMs -1 / -2 завершает процесс (общая точка для хуков samp и GTA). */
-void PerformHardExitIfRequested() {
-    if (g_config.timeMs == -1) {
+/** Жёсткий выход по ключам `CGame shutdown exit` и устаревшему `Time in milliseconds` -1/-2. */
+void CheckCgameShutdownHardExit() {
+    if (g_config.cgameShutdownExit == 1 || g_config.timeMs == -1) {
         ExitProcess(0);
     }
-    if (g_config.timeMs == -2) {
+    if (g_config.cgameShutdownExit == 2 || g_config.timeMs == -2) {
+        TerminateProcess(GetCurrentProcess(), 0);
+    }
+}
+
+/** Жёсткий выход по ключам `SAMP unload exit` и устаревшему `Time in milliseconds` -1/-2. */
+void CheckSampUnloadHardExit() {
+    if (g_config.sampUnloadExit == 1 || g_config.timeMs == -1) {
+        ExitProcess(0);
+    }
+    if (g_config.sampUnloadExit == 2 || g_config.timeMs == -2) {
         TerminateProcess(GetCurrentProcess(), 0);
     }
 }
 
 DWORD WINAPI HookGetTickCount() {
-    PerformHardExitIfRequested();
+    CheckSampUnloadHardExit();
     return ::GetTickCount();
 }
 
 bool __cdecl HookedCGameShutdown() {
-    PerformHardExitIfRequested();
+    CheckCgameShutdownHardExit();
     g_inGtaShutdown.store(true, std::memory_order_release);
     const bool result = g_origCGameShutdown != nullptr ? g_origCGameShutdown() : false;
     g_inGtaShutdown.store(false, std::memory_order_release);
@@ -292,15 +371,18 @@ bool InstallGetTickCountHook(std::uintptr_t callAddress) {
 /** Патчи таймера выгрузки, задержки /quit и при необходимости хук GetTickCount. */
 bool ApplyPatches(HMODULE sampModule, const SampVersionInfo& version) {
     const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(sampModule);
-    const std::uint32_t delay = g_config.timeMs >= 0 ? static_cast<std::uint32_t>(g_config.timeMs) : 0u;
-
-    if (!WriteBytes(reinterpret_cast<void*>(base + version.timeOperandOffset), &delay, sizeof(delay))) {
-        return false;
-    }
-    if (version.quitDelayImm32Rva != 0) {
-        const auto* pushOpcode = reinterpret_cast<const std::uint8_t*>(base + version.quitDelayImm32Rva - 1);
-        if (*pushOpcode == 0x68) {
-            (void)WriteBytes(reinterpret_cast<void*>(base + version.quitDelayImm32Rva), &delay, sizeof(delay));
+    // При жёстком выходе через GTC не трогаем imm32 таймеров — иначе возможны краши в цепочке /quit до вызова GTC.
+    const bool patchSampDelays = (g_config.sampUnloadExit == 0);
+    if (patchSampDelays) {
+        const std::uint32_t delay = g_config.timeMs >= 0 ? static_cast<std::uint32_t>(g_config.timeMs) : 0u;
+        if (!WriteBytes(reinterpret_cast<void*>(base + version.timeOperandOffset), &delay, sizeof(delay))) {
+            return false;
+        }
+        if (version.quitDelayImm32Rva != 0) {
+            const auto* pushOpcode = reinterpret_cast<const std::uint8_t*>(base + version.quitDelayImm32Rva - 1);
+            if (*pushOpcode == 0x68) {
+                (void)WriteBytes(reinterpret_cast<void*>(base + version.quitDelayImm32Rva), &delay, sizeof(delay));
+            }
         }
     }
     if (version.getTickCountCallOffset == 0) {
@@ -309,7 +391,7 @@ bool ApplyPatches(HMODULE sampModule, const SampVersionInfo& version) {
     return InstallGetTickCountHook(base + version.getTickCountCallOffset);
 }
 
-/** Ждёт загрузки GTA, читает конфиг, ставит хуки GTA, ждёт samp и патчит известную сборку. */
+/** Ждёт загрузки GTA, читает конфиг, ставит хуки GTA (1.0 US), при SA:MP — патчи только к известной `samp.dll`. В одиночной игре `samp.dll` не загружается — SA:MP-правки не вызываются. */
 DWORD WINAPI InitializePlugin(void*) {
     const auto* gtaLoadState = reinterpret_cast<volatile DWORD*>(kGtaLoadStateAddress);
     while (*gtaLoadState < 9) {
@@ -319,13 +401,19 @@ DWORD WINAPI InitializePlugin(void*) {
     g_hookTargetAddress = reinterpret_cast<std::uint32_t>(&HookGetTickCount);
     (void)InstallGtaShutdownHooks();
 
+    // Одиночная игра: `samp.dll` в процессе не появляется — выходим из потока после таймаута (SA:MP обычно уже подгрузил dll к этому моменту).
+    constexpr DWORD kMaxWaitForSampMs = 300000;
+    const DWORD waitStart = GetTickCount();
     for (;;) {
         HMODULE sampModule = GetModuleHandleA("samp.dll");
         if (sampModule != nullptr) {
             const auto* version = DetectSampVersion(sampModule);
             if (version != nullptr) {
-                ApplyPatches(sampModule, *version);
+                (void)ApplyPatches(sampModule, *version);
             }
+            return 0;
+        }
+        if (GetTickCount() - waitStart >= kMaxWaitForSampMs) {
             return 0;
         }
         Sleep(100);
