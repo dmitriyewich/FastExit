@@ -13,7 +13,10 @@ static_assert(sizeof(void*) == 4, "FastExit.asi must be built for Win32.");
 
 namespace {
 constexpr DWORD kGtaLoadStateAddress = 0x00C8D4C0;
+/** Глобал gta_sa.exe 1.0 US: HWND главного окна. Валиден и в compact, и в Hoodlum. */
+constexpr std::uintptr_t kGtaHwndAddress = 0x00C8CF88;
 constexpr DWORD kMaxWaitForSampMs = 300000;
+constexpr DWORD kMaxWaitForWindowMs = 30000;
 constexpr WCHAR kIniFileName[] = L"FastExit.ini";
 constexpr WCHAR kConfigSection[] = L"Settings";
 constexpr WCHAR kConfigKeyExitMode[] = L"Exit mode";
@@ -55,6 +58,7 @@ Config g_config;
 std::uint32_t g_indirectThunkTarget = 0;
 using CGameShutdown_t = bool(__cdecl*)();
 static CGameShutdown_t g_origCGameShutdown = nullptr;
+WNDPROC g_origGtaWndProc = nullptr;
 const IMAGE_NT_HEADERS32* GetPe32NtHeaders(HMODULE module) {
     if (!module) {
         return nullptr;
@@ -95,7 +99,7 @@ bool WriteDefaultIniIfNotExists(const WCHAR* path) {
     static const char kBody[] =
         "[Settings]\r\n"
         "; 0 — как без плагина; 1 — ExitProcess; 2 — TerminateProcess.\r\n"
-        "; «Выйти» (CGame::Shutdown, gta_sa 1.0 US) и выгрузка samp после /q и /quit (одна подмена call; R2 — без RVA).\r\n"
+        "; «Выйти» (CGame::Shutdown, gta_sa 1.0 US), выгрузка samp после /q и /quit (одна подмена call; R2 — без RVA), а также ALT+F4 и кнопка закрытия окна.\r\n"
         "Exit mode=0\r\n";
     const HANDLE h = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
@@ -195,6 +199,12 @@ bool __cdecl HookedCGameShutdown() {
     HardExitIfEnabled();
     return g_origCGameShutdown ? g_origCGameShutdown() : false;
 }
+LRESULT CALLBACK HookedGtaWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    if ((msg == WM_SYSCOMMAND && (wp & 0xFFF0) == SC_CLOSE) || msg == WM_CLOSE) {
+        HardExitIfEnabled();
+    }
+    return CallWindowProcA(g_origGtaWndProc, h, msg, wp, lp);
+}
 /** Подмена `E8 rel` или `FF 15 imm32` на вызов `hookFn` (для FF 15 в `g_indirectThunkTarget` кладётся адрес хука). */
 bool PatchCallToHook(std::uintptr_t callSite, void* hookFn) {
     std::uint8_t op[2] = {};
@@ -225,6 +235,35 @@ bool ApplySampUnloadHook(HMODULE sampModule, const SampVersionInfo& version) {
     }
     const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(sampModule);
     return PatchCallToHook(base + version.sampUnloadGetTickCountCallRva, reinterpret_cast<void*>(&HookSampUnloadGetTickCount));
+}
+bool InstallWindowCloseHook() {
+    if (!g_config.exitMode) {
+        return true;
+    }
+    HMODULE exe = GetModuleHandleA(nullptr);
+    if (!IsGtaSa10UsExecutable(exe)) {
+        return false;
+    }
+    const auto* hwndSlot = reinterpret_cast<volatile HWND*>(kGtaHwndAddress);
+    const DWORD t0 = GetTickCount();
+    HWND hwnd = nullptr;
+    for (;;) {
+        hwnd = *hwndSlot;
+        if (hwnd && IsWindow(hwnd)) {
+            break;
+        }
+        if (GetTickCount() - t0 >= kMaxWaitForWindowMs) {
+            return false;
+        }
+        Sleep(50);
+    }
+    const LONG_PTR prev = SetWindowLongPtrA(
+        hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&HookedGtaWndProc));
+    if (!prev) {
+        return false;
+    }
+    g_origGtaWndProc = reinterpret_cast<WNDPROC>(prev);
+    return true;
 }
 bool InstallGtaShutdownHook() {
     if (!g_config.exitMode) {
@@ -274,8 +313,9 @@ void WaitForSampAndApplyHook() {
     }
 }
 DWORD WINAPI InitializePlugin(void* param) {
-    WaitUntilGtaLoaded();
     g_config = LoadConfig(static_cast<HMODULE>(param));
+    (void)InstallWindowCloseHook();
+    WaitUntilGtaLoaded();
     WaitForSampAndApplyHook();
     (void)InstallGtaShutdownHook();
     return 0;
