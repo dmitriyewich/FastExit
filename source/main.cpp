@@ -14,9 +14,9 @@ static_assert(sizeof(void*) == 4, "FastExit.asi must be built for Win32.");
 namespace {
 constexpr DWORD kGtaLoadStateAddress = 0x00C8D4C0;
 constexpr DWORD kMaxWaitForSampMs = 300000;
-constexpr char kIniFileName[] = "FastExit.ini";
-constexpr char kConfigSection[] = "Settings";
-constexpr char kConfigKeyExitMode[] = "Exit mode";
+constexpr WCHAR kIniFileName[] = L"FastExit.ini";
+constexpr WCHAR kConfigSection[] = L"Settings";
+constexpr WCHAR kConfigKeyExitMode[] = L"Exit mode";
 constexpr std::uint32_t kGta10UsTextStartCompact = 0x53EC8B55u;
 constexpr std::uint32_t kGta10UsTextStartHoodlum = 0x16197BE9u;
 /** RVA `CGame::Shutdown` (1.0 US / Hoodlum): VA 0x0053C900 − ImageBase 0x00400000. */
@@ -29,7 +29,6 @@ struct SampVersionInfo {
 };
 struct Config {
     int exitMode = 0;
-    char path[MAX_PATH]{};
 };
 constexpr std::array<SampVersionInfo, 8> kSupportedVersions{{
     { 0x031DF13, "R1", 0x000B28DE },
@@ -52,7 +51,6 @@ struct IndirectCallPatch {
     std::uint32_t targetPointerAddress;
 };
 #pragma pack(pop)
-HMODULE g_module = nullptr;
 Config g_config;
 std::uint32_t g_indirectThunkTarget = 0;
 using CGameShutdown_t = bool(__cdecl*)();
@@ -72,26 +70,26 @@ const IMAGE_NT_HEADERS32* GetPe32NtHeaders(HMODULE module) {
     }
     return nt;
 }
-void BuildConfigPath(char out[MAX_PATH]) {
-    if (GetModuleFileNameA(g_module, out, MAX_PATH) == 0) {
-        strcpy_s(out, MAX_PATH, kIniFileName);
-        return;
+/** Полный путь к `FastExit.ini` в каталоге загруженного `FastExit.asi` (тот же `module`, что в `DllMain`). */
+bool BuildIniPath(HMODULE module, WCHAR out[MAX_PATH]) {
+    const DWORD n = GetModuleFileNameW(module, out, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) {
+        return false;
     }
-    char* slash = nullptr;
-    for (char* p = out; *p; ++p) {
-        if (*p == '\\' || *p == '/') {
+    WCHAR* slash = nullptr;
+    for (WCHAR* p = out; *p; ++p) {
+        if (*p == L'\\' || *p == L'/') {
             slash = p;
         }
     }
-    if (slash) {
-        slash[1] = '\0';
-        strcat_s(out, MAX_PATH, kIniFileName);
-    } else {
-        strcpy_s(out, MAX_PATH, kIniFileName);
+    if (!slash) {
+        return false;
     }
+    slash[1] = L'\0';
+    return wcscat_s(out, MAX_PATH, kIniFileName) == 0;
 }
-bool WriteDefaultIniIfNotExists(const char* path) {
-    if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) {
+bool WriteDefaultIniIfNotExists(const WCHAR* path) {
+    if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES) {
         return false;
     }
     static const char kBody[] =
@@ -99,7 +97,7 @@ bool WriteDefaultIniIfNotExists(const char* path) {
         "; 0 — как без плагина; 1 — ExitProcess; 2 — TerminateProcess.\r\n"
         "; «Выйти» (CGame::Shutdown, gta_sa 1.0 US) и выгрузка samp после /q и /quit (одна подмена call; R2 — без RVA).\r\n"
         "Exit mode=0\r\n";
-    const HANDLE h = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    const HANDLE h = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
         return false;
     }
@@ -110,26 +108,34 @@ bool WriteDefaultIniIfNotExists(const char* path) {
     return ok && written == n;
 }
 int LoadIniIntClamped(
-    const char* key, const char* defaultStr, int minV, int maxV, int fallback, const char* iniPath) {
-    char rawBuf[64] = {};
-    (void)GetPrivateProfileStringA(kConfigSection, key, defaultStr, rawBuf, static_cast<DWORD>(sizeof(rawBuf)), iniPath);
-    const char* rawStr = rawBuf[0] ? rawBuf : defaultStr;
-    char* end = nullptr;
-    const long parsed = std::strtol(rawStr, &end, 10);
+    const WCHAR* key,
+    const WCHAR* defaultStr,
+    int minV,
+    int maxV,
+    int fallback,
+    const WCHAR* iniPath) {
+    WCHAR rawBuf[64] = {};
+    (void)GetPrivateProfileStringW(kConfigSection, key, defaultStr, rawBuf, static_cast<DWORD>(std::size(rawBuf)), iniPath);
+    const WCHAR* rawStr = rawBuf[0] ? rawBuf : defaultStr;
+    WCHAR* end = nullptr;
+    const long parsed = std::wcstol(rawStr, &end, 10);
     int v = fallback;
     if (end != rawStr && !*end) {
         v = static_cast<int>(std::clamp(parsed, static_cast<long>(minV), static_cast<long>(maxV)));
     }
-    char normalizedValue[32] = {};
-    _snprintf_s(normalizedValue, _TRUNCATE, "%d", v);
-    (void)WritePrivateProfileStringA(kConfigSection, key, normalizedValue, iniPath);
+    WCHAR normalizedValue[32] = {};
+    _snwprintf_s(normalizedValue, std::size(normalizedValue), _TRUNCATE, L"%d", v);
+    (void)WritePrivateProfileStringW(kConfigSection, key, normalizedValue, iniPath);
     return v;
 }
-Config LoadConfig() {
+Config LoadConfig(HMODULE selfModule) {
     Config cfg;
-    BuildConfigPath(cfg.path);
-    (void)WriteDefaultIniIfNotExists(cfg.path);
-    cfg.exitMode = LoadIniIntClamped(kConfigKeyExitMode, "0", 0, 2, 0, cfg.path);
+    WCHAR iniPath[MAX_PATH]{};
+    if (!BuildIniPath(selfModule, iniPath)) {
+        return cfg;
+    }
+    (void)WriteDefaultIniIfNotExists(iniPath);
+    cfg.exitMode = LoadIniIntClamped(kConfigKeyExitMode, L"0", 0, 2, 0, iniPath);
     return cfg;
 }
 bool IsGtaSa10UsExecutable(HMODULE exeModule) {
@@ -267,9 +273,9 @@ void WaitForSampAndApplyHook() {
         Sleep(100);
     }
 }
-DWORD WINAPI InitializePlugin(void*) {
+DWORD WINAPI InitializePlugin(void* param) {
     WaitUntilGtaLoaded();
-    g_config = LoadConfig();
+    g_config = LoadConfig(static_cast<HMODULE>(param));
     WaitForSampAndApplyHook();
     (void)InstallGtaShutdownHook();
     return 0;
@@ -278,9 +284,8 @@ DWORD WINAPI InitializePlugin(void*) {
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
-        g_module = module;
         DisableThreadLibraryCalls(module);
-        if (HANDLE th = CreateThread(nullptr, 0, &InitializePlugin, nullptr, 0, nullptr)) {
+        if (HANDLE th = CreateThread(nullptr, 0, &InitializePlugin, module, 0, nullptr)) {
             CloseHandle(th);
         }
     }
