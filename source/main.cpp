@@ -19,7 +19,8 @@ constexpr char kConfigSection[] = "Settings";
 constexpr char kConfigKeyExitMode[] = "Exit mode";
 constexpr std::uint32_t kGta10UsTextStartCompact = 0x53EC8B55u;
 constexpr std::uint32_t kGta10UsTextStartHoodlum = 0x16197BE9u;
-constexpr std::uint32_t kCGameShutdownRva = 0x00053C900;
+/** RVA `CGame::Shutdown` (1.0 US / Hoodlum): VA 0x0053C900 − ImageBase 0x00400000. */
+constexpr std::uint32_t kCGameShutdownRva = 0x0013C900;
 struct SampVersionInfo {
     DWORD entryPointRva;
     const char* name;
